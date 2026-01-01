@@ -1,11 +1,10 @@
 """
 Notion API client wrapper for the Fitness & Diet Logger.
-Handles all interactions with the Notion API.
+Uses direct HTTP requests with proper API version header.
 """
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
-from notion_client import Client
-from notion_client.errors import APIResponseError
+import httpx
 
 import sys
 sys.path.insert(0, str(__file__).rsplit("/", 2)[0])
@@ -15,7 +14,11 @@ from config import settings
 class NotionLogger:
     """
     Wrapper for Notion API operations related to fitness and diet logging.
+    Uses httpx with explicit Notion-Version header for compatibility.
     """
+
+    API_BASE = "https://api.notion.com/v1"
+    API_VERSION = "2022-06-28"
 
     def __init__(self, api_key: Optional[str] = None, database_id: Optional[str] = None):
         """
@@ -34,18 +37,36 @@ class NotionLogger:
                 "or pass api_key parameter."
             )
 
-        self.client = Client(auth=self.api_key)
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Notion-Version": self.API_VERSION,
+        }
         self._database_validated = False
+
+    def _request(self, method: str, endpoint: str, json_data: Optional[Dict] = None) -> Dict:
+        """Make an HTTP request to the Notion API."""
+        url = f"{self.API_BASE}{endpoint}"
+        response = httpx.request(
+            method=method,
+            url=url,
+            headers=self.headers,
+            json=json_data,
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Notion API error ({response.status_code}): {response.text}")
+        return response.json()
 
     def validate_database(self) -> bool:
         """Validate that the database exists and is accessible."""
         if not self.database_id:
             return False
         try:
-            self.client.databases.retrieve(database_id=self.database_id)
+            self._request("GET", f"/databases/{self.database_id}")
             self._database_validated = True
             return True
-        except APIResponseError as e:
+        except RuntimeError as e:
             print(f"Database validation failed: {e}")
             return False
 
@@ -59,17 +80,15 @@ class NotionLogger:
         Returns:
             The ID of the newly created database.
         """
-        try:
-            response = self.client.databases.create(
-                parent={"type": "page_id", "page_id": parent_page_id},
-                title=[{"type": "text", "text": {"content": settings.DATABASE_NAME}}],
-                properties=settings.DATABASE_PROPERTIES,
-            )
-            self.database_id = response["id"]
-            self._database_validated = True
-            return self.database_id
-        except APIResponseError as e:
-            raise RuntimeError(f"Failed to create database: {e}")
+        payload = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [{"type": "text", "text": {"content": settings.DATABASE_NAME}}],
+            "properties": settings.DATABASE_PROPERTIES,
+        }
+        response = self._request("POST", "/databases", payload)
+        self.database_id = response["id"]
+        self._database_validated = True
+        return self.database_id
 
     def create_log_entry(
         self,
@@ -124,7 +143,7 @@ class NotionLogger:
 
         if description:
             properties["Description"] = {
-                "rich_text": [{"text": {"content": description[:2000]}}]  # Notion limit
+                "rich_text": [{"text": {"content": description[:2000]}}]
             }
 
         if categories:
@@ -161,14 +180,12 @@ class NotionLogger:
         if tags:
             properties["Tags"] = {"multi_select": [{"name": tag} for tag in tags]}
 
-        try:
-            response = self.client.pages.create(
-                parent={"database_id": self.database_id},
-                properties=properties,
-            )
-            return response
-        except APIResponseError as e:
-            raise RuntimeError(f"Failed to create log entry: {e}")
+        payload = {
+            "parent": {"database_id": self.database_id},
+            "properties": properties,
+        }
+
+        return self._request("POST", "/pages", payload)
 
     def query_logs(
         self,
@@ -230,35 +247,31 @@ class NotionLogger:
                     "multi_select": {"contains": tag}
                 })
 
-        query_params: Dict[str, Any] = {
-            "database_id": self.database_id,
+        payload: Dict[str, Any] = {
             "page_size": min(limit, 100),
             "sorts": [{"property": "Date", "direction": "descending"}],
         }
 
         if filters:
             if len(filters) == 1:
-                query_params["filter"] = filters[0]
+                payload["filter"] = filters[0]
             else:
-                query_params["filter"] = {"and": filters}
+                payload["filter"] = {"and": filters}
 
-        try:
-            results = []
-            has_more = True
-            start_cursor = None
+        results = []
+        has_more = True
+        start_cursor = None
 
-            while has_more and len(results) < limit:
-                if start_cursor:
-                    query_params["start_cursor"] = start_cursor
+        while has_more and len(results) < limit:
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
 
-                response = self.client.databases.query(**query_params)
-                results.extend(response["results"])
-                has_more = response.get("has_more", False)
-                start_cursor = response.get("next_cursor")
+            response = self._request("POST", f"/databases/{self.database_id}/query", payload)
+            results.extend(response.get("results", []))
+            has_more = response.get("has_more", False)
+            start_cursor = response.get("next_cursor")
 
-            return results[:limit]
-        except APIResponseError as e:
-            raise RuntimeError(f"Failed to query logs: {e}")
+        return results[:limit]
 
     def get_logs_for_date(self, target_date: date) -> List[Dict[str, Any]]:
         """Get all logs for a specific date."""
@@ -272,7 +285,6 @@ class NotionLogger:
 
     def get_logs_for_month(self, year: int, month: int) -> List[Dict[str, Any]]:
         """Get all logs for a specific month."""
-        from datetime import timedelta
         import calendar
 
         start_date = date(year, month, 1)
@@ -342,14 +354,7 @@ class NotionLogger:
         if "tags" in kwargs:
             properties["Tags"] = {"multi_select": [{"name": tag} for tag in kwargs["tags"]]}
 
-        try:
-            response = self.client.pages.update(
-                page_id=page_id,
-                properties=properties,
-            )
-            return response
-        except APIResponseError as e:
-            raise RuntimeError(f"Failed to update log entry: {e}")
+        return self._request("PATCH", f"/pages/{page_id}", {"properties": properties})
 
     def delete_log_entry(self, page_id: str) -> bool:
         """
@@ -361,11 +366,8 @@ class NotionLogger:
         Returns:
             True if successful.
         """
-        try:
-            self.client.pages.update(page_id=page_id, archived=True)
-            return True
-        except APIResponseError as e:
-            raise RuntimeError(f"Failed to delete log entry: {e}")
+        self._request("PATCH", f"/pages/{page_id}", {"archived": True})
+        return True
 
     def extract_log_data(self, page: Dict[str, Any]) -> Dict[str, Any]:
         """

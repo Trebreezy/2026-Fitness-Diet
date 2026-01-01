@@ -441,7 +441,7 @@ class LogAnalytics:
                 logs = self._get_logs_as_data(
                     start_date=date.today(), end_date=date.today()
                 )
-                total = sum(log.get("calories", 0) for log in logs)
+                total = sum(log.get("calories") or 0 for log in logs)
                 return {
                     "question": question,
                     "answer": f"You've logged {total} calories today.",
