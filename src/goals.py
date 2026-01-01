@@ -110,13 +110,33 @@ class GoalTracker:
 
     def _set_default_goals(self):
         """Set default goals based on user's stated objectives."""
-        # User goal: Lose 50 lbs in 2026
+        # User stats: 250 lbs, 5'8"
+        # Health concerns: high blood pressure, cholesterol, glucose; low MCH
+        # Goal: Lose 50 lbs in 2026
         self.weight_goal = WeightGoal(
-            starting_weight=225,  # Estimated starting weight (can be updated)
-            target_weight=175,    # 50 lbs less
+            starting_weight=250,  # User's actual starting weight
+            target_weight=200,    # 50 lbs less
             start_date=date(2026, 1, 1),
             target_date=date(2026, 12, 31),
         )
+
+        # Health profile for personalized recommendations
+        self.health_profile = {
+            "height_inches": 68,  # 5'8"
+            "starting_weight": 250,
+            "conditions": [
+                "high_blood_pressure",
+                "high_cholesterol",
+                "high_glucose",
+                "low_mch",  # May indicate iron deficiency
+            ],
+            "dietary_restrictions": [
+                "low_sodium",      # For blood pressure
+                "low_saturated_fat",  # For cholesterol
+                "low_glycemic",    # For glucose
+                "iron_rich",       # For low MCH
+            ],
+        }
 
         # Strength goals
         self.strength_goals = [
@@ -178,15 +198,26 @@ class GoalTracker:
             ),
         ]
 
-        # Daily targets
+        # Daily targets (from "Body of an Athlete" plan)
         self.daily_targets = {
-            "calories": 1800,      # Deficit for weight loss
-            "protein": 150,        # High protein for muscle preservation
-            "carbs": 50,           # Low carb (keto-ish)
-            "fat": 120,            # High fat for keto
-            "water": 8,            # glasses
-            "workouts_per_week": 5,
+            "calories": 2000,      # From user's plan
+            "protein": 200,        # From user's plan (high for muscle preservation)
+            "carbs": 50,           # Low carb for glucose management
+            "fat": 100,            # Moderate fat (prioritize unsaturated for cholesterol)
+            "sodium": 1500,        # Low sodium for blood pressure (mg)
+            "fiber": 30,           # High fiber for cholesterol (g)
+            "water": 100,          # 100 fl oz from user's plan
+            "workouts_per_week": 5,  # 5-6 days from plan
             "steps": 10000,
+        }
+
+        # Training schedule from "Body of an Athlete"
+        self.training_schedule = {
+            "strength_days": 3,           # 3 strength training days
+            "distance_cardio_days": 1,    # 30min to 1hr
+            "hiit_days": 1,               # HIIT/sprints + 45min yoga
+            "sports_days": 1,             # Optional
+            "recovery_days": 1,           # Foam roller/massage
         }
 
         self._save_goals()
@@ -345,7 +376,7 @@ class GoalTracker:
         }
 
     def _get_recommendations(self, calories: int, protein: float, workouts: int) -> List[str]:
-        """Generate recommendations based on progress."""
+        """Generate recommendations based on progress and health profile."""
         recs = []
         targets = self.daily_targets
 
@@ -356,7 +387,8 @@ class GoalTracker:
             recs.append(f"You have {calories_remaining} calories remaining. Consider a protein-rich meal.")
 
         if protein_remaining > 40:
-            recs.append(f"You need {protein_remaining:.0f}g more protein today. Try chicken, fish, or eggs.")
+            # Recommend iron-rich protein sources for low MCH
+            recs.append(f"You need {protein_remaining:.0f}g more protein. Try iron-rich options: beef, salmon, spinach, or lentils.")
 
         if calories_remaining < 200 and protein_remaining > 20:
             recs.append("Low on calories but need protein? Try a protein shake or lean chicken breast.")
@@ -364,10 +396,38 @@ class GoalTracker:
         if workouts == 0:
             recs.append("No workout logged today. Even a 20-minute walk helps!")
 
+        # Health-specific recommendations
+        health_tips = self._get_health_tips()
+        if health_tips:
+            recs.extend(health_tips)
+
         if not recs:
             recs.append("Great job! You're on track with your goals today.")
 
         return recs
+
+    def _get_health_tips(self) -> List[str]:
+        """Get health-specific tips based on user's conditions."""
+        tips = []
+        profile = getattr(self, 'health_profile', None)
+        if not profile:
+            return tips
+
+        conditions = profile.get('conditions', [])
+
+        if 'high_blood_pressure' in conditions:
+            tips.append("💡 BP tip: Choose low-sodium options. Season with herbs, lemon, and spices instead of salt.")
+
+        if 'high_cholesterol' in conditions:
+            tips.append("💡 Cholesterol tip: Include omega-3 rich foods (salmon, sardines, walnuts) and soluble fiber (oats, beans).")
+
+        if 'high_glucose' in conditions:
+            tips.append("💡 Blood sugar tip: Eat protein with every meal, avoid simple carbs, and consider a post-meal walk.")
+
+        if 'low_mch' in conditions:
+            tips.append("💡 Iron tip: Pair iron-rich foods (red meat, spinach, lentils) with vitamin C for better absorption.")
+
+        return tips[:2]  # Limit to 2 tips per check
 
     def get_full_status(self) -> Dict[str, Any]:
         """Get comprehensive goal status."""
