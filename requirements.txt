@@ -1,0 +1,11 @@
+notion-client>=2.0.0
+python-dotenv>=1.0.0
+Pillow>=10.0.0
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
+mcp>=1.0.0
+click>=8.1.0
+rich>=13.0.0
+pandas>=2.0.0
+httpx>=0.25.0
+python-dateutil>=2.8.0
