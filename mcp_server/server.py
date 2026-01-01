@@ -1,6 +1,6 @@
 """
 MCP (Model Context Protocol) Server for Fitness & Diet Logger.
-This server enables Claude Code to interact with the logging system.
+Enhanced with smart conversational logging, suggestions, and goal tracking.
 
 To use with Claude Code, add to your MCP settings:
 {
@@ -18,7 +18,6 @@ To use with Claude Code, add to your MCP settings:
 """
 import asyncio
 import json
-import base64
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, List, Any
@@ -33,8 +32,6 @@ from mcp.server.stdio import stdio_server
 from mcp.types import (
     Tool,
     TextContent,
-    ImageContent,
-    Resource,
     Prompt,
     PromptMessage,
     GetPromptResult,
@@ -42,9 +39,11 @@ from mcp.types import (
 
 from src.notion_client import NotionLogger
 from src.logger import FitnessDietLogger
-from src.photo_handler import PhotoHandler
-from src.voice_handler import VoiceHandler
 from src.analytics import LogAnalytics
+from src.smart_assistant import SmartAssistant
+from src.goals import GoalTracker
+from src.patterns import PatternLearner
+from src.food_database import find_food, estimate_food
 
 
 # Initialize the MCP server
@@ -53,10 +52,12 @@ server = Server("fitness-diet-logger")
 # Global instances (initialized on first use)
 _logger: Optional[FitnessDietLogger] = None
 _analytics: Optional[LogAnalytics] = None
+_assistant: Optional[SmartAssistant] = None
+_goal_tracker: Optional[GoalTracker] = None
+_pattern_learner: Optional[PatternLearner] = None
 
 
 def get_logger() -> FitnessDietLogger:
-    """Get or create the logger instance."""
     global _logger
     if _logger is None:
         _logger = FitnessDietLogger()
@@ -64,101 +65,96 @@ def get_logger() -> FitnessDietLogger:
 
 
 def get_analytics() -> LogAnalytics:
-    """Get or create the analytics instance."""
     global _analytics
     if _analytics is None:
         _analytics = LogAnalytics(get_logger().notion)
     return _analytics
 
 
+def get_assistant() -> SmartAssistant:
+    global _assistant
+    if _assistant is None:
+        _assistant = SmartAssistant()
+    return _assistant
+
+
+def get_goal_tracker() -> GoalTracker:
+    global _goal_tracker
+    if _goal_tracker is None:
+        _goal_tracker = GoalTracker()
+    return _goal_tracker
+
+
+def get_pattern_learner() -> PatternLearner:
+    global _pattern_learner
+    if _pattern_learner is None:
+        _pattern_learner = PatternLearner()
+    return _pattern_learner
+
+
 @server.list_tools()
 async def list_tools() -> List[Tool]:
     """List available tools for Claude."""
     return [
+        # === SMART LOGGING TOOLS ===
         Tool(
-            name="log_meal",
-            description="Log a meal with optional photo, calories, and nutritional info. Records to Notion calendar.",
+            name="smart_log_meal",
+            description="""Intelligently log a meal with automatic calorie/protein estimation.
+            Claude should use this to parse natural descriptions like "I had a chicken salad for lunch".
+            The tool will estimate nutrition and return any clarifying questions.
+            IMPORTANT: Always ask follow-up questions if the response indicates clarification is needed.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the meal (e.g., 'Grilled Chicken Salad')"
-                    },
-                    "category": {
-                        "type": "string",
-                        "enum": ["Breakfast", "Lunch", "Dinner", "Snack"],
-                        "description": "Meal category"
-                    },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of the meal"
+                        "description": "Natural description of the meal (e.g., 'grilled chicken with salad')"
                     },
-                    "calories": {
-                        "type": "integer",
-                        "description": "Calorie count"
-                    },
-                    "protein": {
-                        "type": "number",
-                        "description": "Protein in grams"
-                    },
-                    "photo_path": {
+                    "meal_type": {
                         "type": "string",
-                        "description": "Path to a photo of the meal"
+                        "enum": ["Breakfast", "Lunch", "Dinner", "Snack"],
+                        "description": "Optional meal type. Will be inferred from time of day if not provided."
                     },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Tags like 'healthy', 'high protein', etc."
+                    "confirmed_calories": {
+                        "type": "integer",
+                        "description": "If user confirmed/corrected the calorie estimate"
+                    },
+                    "confirmed_protein": {
+                        "type": "number",
+                        "description": "If user confirmed/corrected the protein estimate"
                     }
                 },
-                "required": ["name"]
+                "required": ["description"]
             }
         ),
         Tool(
-            name="log_workout",
-            description="Log a workout session with duration and details.",
+            name="smart_log_workout",
+            description="""Log a workout with intelligent parsing.
+            Parses descriptions like "30 minute run" or "upper body strength training".
+            Returns clarifying questions if details are missing.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {
+                    "description": {
                         "type": "string",
-                        "description": "Name/type of workout (e.g., 'Morning Run', 'Upper Body')"
+                        "description": "Description of the workout"
+                    },
+                    "duration": {
+                        "type": "integer",
+                        "description": "Duration in minutes (if known)"
                     },
                     "category": {
                         "type": "string",
                         "enum": ["Cardio", "Strength", "Flexibility"],
-                        "description": "Workout category"
-                    },
-                    "duration": {
-                        "type": "integer",
-                        "description": "Duration in minutes"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Workout details (exercises, sets, reps)"
-                    },
-                    "calories_burned": {
-                        "type": "integer",
-                        "description": "Estimated calories burned"
-                    },
-                    "mood_after": {
-                        "type": "string",
-                        "enum": ["1 - Very Low", "2 - Low", "3 - Neutral", "4 - Good", "5 - Excellent"],
-                        "description": "Mood after workout"
-                    },
-                    "energy_after": {
-                        "type": "string",
-                        "enum": ["1 - Exhausted", "2 - Tired", "3 - Normal", "4 - Energetic", "5 - Peak"],
-                        "description": "Energy level after workout"
+                        "description": "Workout category (if known)"
                     }
                 },
-                "required": ["name"]
+                "required": ["description"]
             }
         ),
         Tool(
             name="log_weight",
-            description="Log your current weight.",
+            description="Log current weight and update goal progress.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -169,242 +165,134 @@ async def list_tools() -> List[Tool]:
                     "notes": {
                         "type": "string",
                         "description": "Optional notes"
-                    },
-                    "mood": {
-                        "type": "string",
-                        "enum": ["1 - Very Low", "2 - Low", "3 - Neutral", "4 - Good", "5 - Excellent"],
-                        "description": "Current mood"
                     }
                 },
                 "required": ["weight"]
             }
         ),
+
+        # === SUGGESTION TOOLS ===
         Tool(
-            name="log_mood",
-            description="Log your current mood and energy level.",
+            name="suggest_meal",
+            description="""Get personalized meal suggestions based on:
+            - Keto and slow-carb diet principles
+            - Remaining daily calories/protein
+            - User's meal history and preferences
+            Use this when user asks what to eat or needs meal ideas.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "mood": {
+                    "meal_type": {
                         "type": "string",
-                        "enum": ["1 - Very Low", "2 - Low", "3 - Neutral", "4 - Good", "5 - Excellent"],
-                        "description": "Current mood score"
-                    },
-                    "energy": {
-                        "type": "string",
-                        "enum": ["1 - Exhausted", "2 - Tired", "3 - Normal", "4 - Energetic", "5 - Peak"],
-                        "description": "Current energy level"
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": "How you're feeling, what's on your mind"
+                        "enum": ["Breakfast", "Lunch", "Dinner", "Snack", "any"],
+                        "description": "Type of meal"
                     }
                 },
-                "required": ["mood"]
+                "required": ["meal_type"]
             }
         ),
         Tool(
-            name="log_photo",
-            description="Log a photo (progress pic, food, etc.) to your Notion calendar.",
+            name="suggest_workout",
+            description="""Get personalized workout suggestions based on:
+            - User's goals (strength, stamina, flexibility)
+            - Recent workout history
+            - Current day of week
+            Use this when user asks what workout to do.""",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "photo_path": {
-                        "type": "string",
-                        "description": "Path to the photo file"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Name/title for the photo"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Description of the photo"
-                    },
-                    "category": {
-                        "type": "string",
-                        "enum": ["Progress", "Meal", "Workout"],
-                        "description": "Photo category"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Tags for the photo"
-                    }
-                },
-                "required": ["photo_path"]
+                "properties": {}
+            }
+        ),
+
+        # === GOAL & PROGRESS TOOLS ===
+        Tool(
+            name="get_daily_briefing",
+            description="""Get today's progress summary including:
+            - Calories/protein consumed vs targets
+            - Weight goal progress
+            - Recommendations for rest of day
+            Use this at start of conversation or when user asks about progress.""",
+            inputSchema={
+                "type": "object",
+                "properties": {}
             }
         ),
         Tool(
-            name="log_voice_note",
-            description="Log a voice note. Transcribes the audio and saves to Notion.",
+            name="get_goal_status",
+            description="Get detailed status of weight loss and fitness goals.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "audio_path": {
-                        "type": "string",
-                        "description": "Path to the audio file"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Name/title for the voice note"
-                    },
-                    "transcribe": {
-                        "type": "boolean",
-                        "description": "Whether to transcribe the audio (default: true)"
-                    }
-                },
-                "required": ["audio_path"]
+                "properties": {}
             }
         ),
         Tool(
-            name="log_note",
-            description="Log a simple text note.",
+            name="update_starting_weight",
+            description="Set or update the starting weight for goal tracking.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The note content"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Optional title for the note"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Tags for the note"
+                    "weight": {
+                        "type": "number",
+                        "description": "Starting weight in pounds"
                     }
                 },
-                "required": ["content"]
+                "required": ["weight"]
             }
         ),
+
+        # === QUERY TOOLS ===
         Tool(
             name="get_today_logs",
             description="Get all logs for today.",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
-        ),
-        Tool(
-            name="get_logs_by_date",
-            description="Get all logs for a specific date.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "date": {
-                        "type": "string",
-                        "description": "Date in YYYY-MM-DD format"
-                    }
-                },
-                "required": ["date"]
-            }
-        ),
-        Tool(
-            name="get_weekly_summary",
-            description="Get a summary of the current week's logs.",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
-        ),
-        Tool(
-            name="get_calorie_trends",
-            description="Analyze calorie intake trends over time.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to analyze (default: 30)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="get_workout_trends",
-            description="Analyze workout frequency and duration trends.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to analyze (default: 30)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="get_weight_trends",
-            description="Analyze weight trends over time.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to analyze (default: 90)"
-                    }
-                }
-            }
+            inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="ask_database",
-            description="Ask a natural language question about your fitness and diet data.",
+            description="Ask a natural language question about fitness/diet data.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "Your question (e.g., 'How many calories did I eat this week?')"
+                        "description": "Question about the data"
                     }
                 },
                 "required": ["question"]
             }
         ),
         Tool(
-            name="get_insights",
-            description="Get personalized insights based on your recent data.",
+            name="get_trends",
+            description="Get calorie, workout, or weight trends.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "trend_type": {
+                        "type": "string",
+                        "enum": ["calories", "workouts", "weight", "all"],
+                        "description": "Type of trend to analyze"
+                    },
                     "days": {
                         "type": "integer",
-                        "description": "Number of days to analyze (default: 30)"
+                        "description": "Number of days to analyze (default 30)"
                     }
-                }
+                },
+                "required": ["trend_type"]
             }
         ),
+
+        # === FOOD DATABASE TOOLS ===
         Tool(
-            name="search_logs",
-            description="Search logs with filters.",
+            name="lookup_food",
+            description="Look up nutritional info for a specific food.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "log_type": {
+                    "food": {
                         "type": "string",
-                        "enum": ["Meal", "Workout", "Weight", "Mood", "Photo", "Voice Note", "Text Note"],
-                        "description": "Filter by log type"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter by tags"
-                    },
-                    "start_date": {
-                        "type": "string",
-                        "description": "Start date (YYYY-MM-DD)"
-                    },
-                    "end_date": {
-                        "type": "string",
-                        "description": "End date (YYYY-MM-DD)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum results (default: 20)"
+                        "description": "Name of food to look up"
                     }
-                }
+                },
+                "required": ["food"]
             }
         ),
     ]
@@ -416,212 +304,279 @@ async def call_tool(name: str, arguments: dict) -> List[TextContent]:
     try:
         logger = get_logger()
         analytics = get_analytics()
+        assistant = get_assistant()
+        goals = get_goal_tracker()
 
-        if name == "log_meal":
-            categories = [arguments.get("category")] if arguments.get("category") else None
+        # === SMART LOGGING ===
+        if name == "smart_log_meal":
+            description = arguments["description"]
+            parsed = assistant.parse_food_entry(description)
+
+            # Use confirmed values if provided, otherwise use estimates
+            calories = arguments.get("confirmed_calories") or parsed["estimates"]["calories"]
+            protein = arguments.get("confirmed_protein") or parsed["estimates"]["protein"]
+            meal_type = arguments.get("meal_type") or parsed["meal_type"]
+
+            # Log the meal
             result = logger.log_meal(
-                name=arguments["name"],
-                categories=categories,
-                description=arguments.get("description"),
-                calories=arguments.get("calories"),
-                protein=arguments.get("protein"),
-                photo_path=arguments.get("photo_path"),
-                tags=arguments.get("tags"),
+                name=description[:100],
+                categories=[meal_type],
+                description=description,
+                calories=calories,
+                protein=protein,
+                tags=["keto"] if parsed.get("keto_friendly") else (["slow_carb"] if parsed.get("slow_carb_friendly") else []),
             )
-            return [TextContent(
-                type="text",
-                text=f"✅ Meal logged: {arguments['name']}\n"
-                     f"📅 Date: {date.today().isoformat()}\n"
-                     f"{'🔥 Calories: ' + str(arguments.get('calories')) if arguments.get('calories') else ''}"
-            )]
 
-        elif name == "log_workout":
-            categories = [arguments.get("category")] if arguments.get("category") else None
+            # Build response
+            response = f"✅ Logged: {description}\n"
+            response += f"📊 {calories} cal | {protein}g protein | {meal_type}\n"
+
+            if parsed.get("warnings"):
+                response += "\n" + "\n".join(parsed["warnings"]) + "\n"
+
+            if parsed["needs_clarification"] or parsed.get("follow_up_questions"):
+                response += "\n❓ To improve accuracy, I should ask:\n"
+                for q in parsed.get("follow_up_questions", [])[:2]:
+                    response += f"   • {q}\n"
+
+            # Show remaining targets
+            today_logs = logger.get_today_logs()
+            total_cal = sum(log.get("calories") or 0 for log in today_logs)
+            total_pro = sum(log.get("protein") or 0 for log in today_logs)
+            targets = goals.get_daily_targets()
+            response += f"\n📈 Today: {total_cal}/{targets['calories']} cal | {total_pro:.0f}/{targets['protein']}g protein"
+
+            return [TextContent(type="text", text=response)]
+
+        elif name == "smart_log_workout":
+            description = arguments["description"]
+            parsed = assistant.parse_workout_entry(description)
+
+            duration = arguments.get("duration") or parsed.get("duration") or 30
+            category = arguments.get("category") or parsed.get("category") or "General"
+            calories = parsed.get("calories_burned")
+
             result = logger.log_workout(
-                name=arguments["name"],
-                categories=categories,
-                description=arguments.get("description"),
-                duration=arguments.get("duration"),
-                calories_burned=arguments.get("calories_burned"),
-                mood_score=arguments.get("mood_after"),
-                energy_level=arguments.get("energy_after"),
+                name=description[:100],
+                categories=[category],
+                description=description,
+                duration=duration,
+                calories_burned=calories,
             )
-            return [TextContent(
-                type="text",
-                text=f"💪 Workout logged: {arguments['name']}\n"
-                     f"📅 Date: {date.today().isoformat()}\n"
-                     f"{'⏱️ Duration: ' + str(arguments.get('duration')) + ' min' if arguments.get('duration') else ''}"
-            )]
+
+            response = f"💪 Logged: {description}\n"
+            response += f"⏱️ {duration} min | {category}"
+            if calories:
+                response += f" | ~{calories} cal burned"
+            response += "\n"
+
+            if parsed.get("follow_up_questions"):
+                response += "\n❓ For better tracking:\n"
+                for q in parsed["follow_up_questions"]:
+                    response += f"   • {q}\n"
+
+            return [TextContent(type="text", text=response)]
 
         elif name == "log_weight":
+            weight = arguments["weight"]
+            goals.update_weight(weight)
+
             result = logger.log_weight(
-                weight=arguments["weight"],
-                description=arguments.get("notes"),
-                mood_score=arguments.get("mood"),
-            )
-            return [TextContent(
-                type="text",
-                text=f"⚖️ Weight logged: {arguments['weight']} lbs\n"
-                     f"📅 Date: {date.today().isoformat()}"
-            )]
-
-        elif name == "log_mood":
-            result = logger.log_mood(
-                mood_score=arguments["mood"],
-                energy_level=arguments.get("energy"),
+                weight=weight,
                 description=arguments.get("notes"),
             )
-            return [TextContent(
-                type="text",
-                text=f"😊 Mood logged\n"
-                     f"Mood: {arguments['mood']}\n"
-                     f"{'Energy: ' + arguments.get('energy') if arguments.get('energy') else ''}"
-            )]
 
-        elif name == "log_photo":
-            result = logger.log_photo(
-                photo_path=arguments["photo_path"],
-                name=arguments.get("name"),
-                description=arguments.get("description"),
-                categories=[arguments.get("category")] if arguments.get("category") else None,
-                tags=arguments.get("tags"),
-            )
-            return [TextContent(
-                type="text",
-                text=f"📸 Photo logged successfully!\n"
-                     f"📅 Date: {date.today().isoformat()}"
-            )]
+            status = goals.get_weight_status()
+            response = f"⚖️ Weight logged: {weight} lbs\n\n"
+            response += f"📊 Progress:\n"
+            response += f"   Started: {status['starting_weight']} lbs\n"
+            response += f"   Current: {status['current_weight']} lbs\n"
+            response += f"   Lost: {status['lost_so_far']} lbs\n"
+            response += f"   Target: {status['target_weight']} lbs ({status['remaining_to_lose']} to go)\n"
+            response += f"   Progress: {status['progress_percentage']:.1f}%\n"
+            response += f"\n{'✅ On track!' if status['on_track'] else '⚠️ Behind pace - need to lose ~' + str(round(status['weekly_target'], 1)) + ' lbs/week'}"
 
-        elif name == "log_voice_note":
-            result = logger.log_voice_note(
-                audio_path=arguments["audio_path"],
-                name=arguments.get("name"),
-                transcribe=arguments.get("transcribe", True),
-            )
-            return [TextContent(
-                type="text",
-                text=f"🎤 Voice note logged!\n"
-                     f"📅 Date: {date.today().isoformat()}"
-            )]
+            return [TextContent(type="text", text=response)]
 
-        elif name == "log_note":
-            result = logger.log_text_note(
-                content=arguments["content"],
-                name=arguments.get("name"),
-                tags=arguments.get("tags"),
-            )
-            return [TextContent(
-                type="text",
-                text=f"📝 Note logged!\n"
-                     f"📅 Date: {date.today().isoformat()}"
-            )]
+        # === SUGGESTIONS ===
+        elif name == "suggest_meal":
+            meal_type = arguments.get("meal_type", "any")
+            suggestions = assistant.get_meal_suggestions(meal_type)
 
+            response = f"🍽️ {meal_type} Suggestions:\n\n"
+            for i, s in enumerate(suggestions[:5], 1):
+                diet_tag = f"[{s.get('diet', 'keto').upper()}]" if s.get('diet') else ""
+                response += f"{i}. **{s['name']}** {diet_tag}\n"
+                if s.get('description'):
+                    response += f"   {s['description']}\n"
+                response += f"   📊 {s['calories']} cal | {s['protein']}g protein\n\n"
+
+            response += "_These follow keto/slow-carb principles for your weight loss goal._"
+            return [TextContent(type="text", text=response)]
+
+        elif name == "suggest_workout":
+            suggestions = assistant.get_workout_suggestions()
+
+            response = "💪 Workout Suggestions:\n\n"
+            for i, s in enumerate(suggestions[:5], 1):
+                response += f"{i}. **{s['name']}** [{s['category']}]\n"
+                response += f"   ⏱️ {s['duration']} min\n"
+                response += f"   {s['description']}\n"
+                if s.get('benefits'):
+                    response += f"   ✨ {', '.join(s['benefits'])}\n"
+                response += "\n"
+
+            response += "_These support your goals: strength, stamina, flexibility._"
+            return [TextContent(type="text", text=response)]
+
+        # === PROGRESS ===
+        elif name == "get_daily_briefing":
+            today_logs = logger.get_today_logs()
+            briefing = assistant.get_daily_briefing(today_logs)
+
+            p = briefing["progress"]
+            response = f"📅 **Daily Briefing** - {briefing['date']}\n\n"
+
+            response += "**Nutrition:**\n"
+            response += f"   🔥 Calories: {p['calories']['consumed']}/{p['calories']['target']}"
+            if p['calories']['remaining'] > 0:
+                response += f" ({p['calories']['remaining']} remaining)\n"
+            else:
+                response += f" (⚠️ {p['calories']['over']} over)\n"
+
+            response += f"   🥩 Protein: {p['protein']['consumed']:.0f}/{p['protein']['target']}g"
+            if p['protein']['remaining'] > 0:
+                response += f" ({p['protein']['remaining']:.0f}g to go)\n"
+            else:
+                response += " ✅\n"
+
+            response += f"\n**Activity:**\n"
+            response += f"   🏋️ Workouts: {p['workouts_completed']}\n"
+            response += f"   🍽️ Meals logged: {p['meals_logged']}\n"
+
+            wg = briefing["weight_goal"]
+            if wg.get("current"):
+                response += f"\n**Weight Goal:**\n"
+                response += f"   Current: {wg['current']} lbs | Target: {wg['target']} lbs\n"
+                response += f"   Lost so far: {wg['lost_so_far']} lbs\n"
+
+            if briefing.get("is_cheat_day"):
+                response += "\n🍕 **Cheat Day Detected** - Enjoy it!\n"
+
+            if briefing.get("recommendations"):
+                response += "\n**Recommendations:**\n"
+                for rec in briefing["recommendations"]:
+                    response += f"   • {rec}\n"
+
+            return [TextContent(type="text", text=response)]
+
+        elif name == "get_goal_status":
+            status = goals.get_full_status()
+            wg = status["weight"]
+
+            response = "🎯 **Goal Status**\n\n"
+
+            response += "**Weight Loss Goal:**\n"
+            if wg["has_goal"]:
+                response += f"   Start: {wg['starting_weight']} lbs → Target: {wg['target_weight']} lbs\n"
+                response += f"   Current: {wg['current_weight'] or 'Not logged'} lbs\n"
+                response += f"   Progress: {wg['progress_percentage']:.1f}%\n"
+                response += f"   Days remaining: {wg['days_remaining']}\n"
+            else:
+                response += "   Not set\n"
+
+            response += "\n**Daily Targets:**\n"
+            dt = status["daily_targets"]
+            response += f"   Calories: {dt['calories']} | Protein: {dt['protein']}g\n"
+            response += f"   Carbs: {dt['carbs']}g | Fat: {dt['fat']}g\n"
+            response += f"   Workouts/week: {dt['workouts_per_week']}\n"
+
+            if status.get("strength_goals"):
+                response += "\n**Strength Goals:**\n"
+                for g in status["strength_goals"]:
+                    response += f"   {g['metric']}: {g['current'] or 'N/A'}/{g['target']} {g['unit']}\n"
+
+            return [TextContent(type="text", text=response)]
+
+        elif name == "update_starting_weight":
+            weight = arguments["weight"]
+            goals.update_starting_weight(weight)
+            return [TextContent(type="text", text=f"✅ Starting weight set to {weight} lbs. Target: {weight - 50} lbs.")]
+
+        # === QUERIES ===
         elif name == "get_today_logs":
             logs = logger.get_today_logs()
             if not logs:
                 return [TextContent(type="text", text="No logs for today yet.")]
 
-            summary = f"📅 Today's Logs ({len(logs)} entries):\n\n"
+            response = f"📅 Today's Logs ({len(logs)} entries):\n\n"
             for log in logs:
-                summary += f"• [{log['type']}] {log['name']}\n"
+                response += f"• [{log['type']}] {log['name']}\n"
                 if log.get('calories'):
-                    summary += f"  Calories: {log['calories']}\n"
+                    response += f"  {log['calories']} cal"
+                if log.get('protein'):
+                    response += f" | {log['protein']}g protein"
                 if log.get('duration'):
-                    summary += f"  Duration: {log['duration']} min\n"
-            return [TextContent(type="text", text=summary)]
-
-        elif name == "get_logs_by_date":
-            target_date = date.fromisoformat(arguments["date"])
-            logs = logger.get_logs_by_date(target_date)
-            if not logs:
-                return [TextContent(type="text", text=f"No logs for {arguments['date']}.")]
-
-            summary = f"📅 Logs for {arguments['date']} ({len(logs)} entries):\n\n"
-            for log in logs:
-                summary += f"• [{log['type']}] {log['name']}\n"
-            return [TextContent(type="text", text=summary)]
-
-        elif name == "get_weekly_summary":
-            summary = analytics.get_weekly_summary()
-            text = f"📊 Weekly Summary ({summary['week_start']} to {summary['week_end']})\n\n"
-            text += f"Total entries: {summary['total_entries']}\n"
-            text += f"Calories: {summary['totals']['calories']}\n"
-            text += f"Protein: {summary['totals']['protein']}g\n"
-            text += f"Workouts: {summary['totals']['workouts']}\n"
-            text += f"Workout time: {summary['totals']['workout_minutes']} min\n"
-            return [TextContent(type="text", text=text)]
-
-        elif name == "get_calorie_trends":
-            days = arguments.get("days", 30)
-            trends = analytics.get_calorie_trends(days=days)
-            text = f"🔥 Calorie Trends ({days} days)\n\n"
-            text += f"Average daily: {trends['average_daily']} cal\n"
-            text += f"Max day: {trends['max_daily']} cal\n"
-            text += f"Min day: {trends['min_daily']} cal\n"
-            text += f"Trend: {trends['trend']}\n"
-            return [TextContent(type="text", text=text)]
-
-        elif name == "get_workout_trends":
-            days = arguments.get("days", 30)
-            trends = analytics.get_workout_trends(days=days)
-            text = f"💪 Workout Trends ({days} days)\n\n"
-            text += f"Total workouts: {trends['total_workouts']}\n"
-            text += f"Per week: {trends['workouts_per_week']}\n"
-            text += f"Total time: {trends['total_duration_minutes']} min\n"
-            text += f"Consistency: {trends['consistency_score']}%\n"
-            return [TextContent(type="text", text=text)]
-
-        elif name == "get_weight_trends":
-            days = arguments.get("days", 90)
-            trends = analytics.get_weight_trends(days=days)
-            if trends['current_weight']:
-                text = f"⚖️ Weight Trends ({days} days)\n\n"
-                text += f"Current: {trends['current_weight']} lbs\n"
-                text += f"Starting: {trends['starting_weight']} lbs\n"
-                text += f"Change: {trends['change']:+.1f} lbs\n"
-                text += f"Trend: {trends['trend']}\n"
-            else:
-                text = "No weight data found. Start logging your weight!"
-            return [TextContent(type="text", text=text)]
+                    response += f" | {log['duration']} min"
+                response += "\n"
+            return [TextContent(type="text", text=response)]
 
         elif name == "ask_database":
             result = analytics.answer_question(arguments["question"])
-            return [TextContent(
-                type="text",
-                text=f"❓ {arguments['question']}\n\n💬 {result['answer']}"
-            )]
+            return [TextContent(type="text", text=f"❓ {arguments['question']}\n\n💬 {result['answer']}")]
 
-        elif name == "get_insights":
+        elif name == "get_trends":
+            trend_type = arguments["trend_type"]
             days = arguments.get("days", 30)
-            insights = analytics.get_insights(days=days)
-            text = f"💡 Insights (last {days} days):\n\n"
-            for insight in insights:
-                text += f"{insight}\n"
-            return [TextContent(type="text", text=text)]
 
-        elif name == "search_logs":
-            start = date.fromisoformat(arguments["start_date"]) if arguments.get("start_date") else None
-            end = date.fromisoformat(arguments["end_date"]) if arguments.get("end_date") else None
-            logs = logger.search_logs(
-                log_type=arguments.get("log_type"),
-                tags=arguments.get("tags"),
-                start_date=start,
-                end_date=end,
-                limit=arguments.get("limit", 20),
-            )
-            if not logs:
-                return [TextContent(type="text", text="No logs found matching your criteria.")]
+            response = f"📈 Trends (Last {days} days)\n\n"
 
-            text = f"🔍 Search Results ({len(logs)} found):\n\n"
-            for log in logs:
-                text += f"• [{log['date']}] [{log['type']}] {log['name']}\n"
-            return [TextContent(type="text", text=text)]
+            if trend_type in ["calories", "all"]:
+                cal = analytics.get_calorie_trends(days=days)
+                response += "**Calories:**\n"
+                response += f"   Average: {cal['average_daily']}/day\n"
+                response += f"   Trend: {cal['trend']}\n\n"
+
+            if trend_type in ["workouts", "all"]:
+                work = analytics.get_workout_trends(days=days)
+                response += "**Workouts:**\n"
+                response += f"   Total: {work['total_workouts']}\n"
+                response += f"   Per week: {work['workouts_per_week']}\n"
+                response += f"   Consistency: {work['consistency_score']}%\n\n"
+
+            if trend_type in ["weight", "all"]:
+                wt = analytics.get_weight_trends(days=days)
+                if wt['current_weight']:
+                    response += "**Weight:**\n"
+                    response += f"   Current: {wt['current_weight']} lbs\n"
+                    response += f"   Change: {wt['change']:+.1f} lbs\n"
+                    response += f"   Trend: {wt['trend']}\n"
+
+            return [TextContent(type="text", text=response)]
+
+        elif name == "lookup_food":
+            food = find_food(arguments["food"])
+            if food:
+                keto = "✅" if food.keto_friendly else "❌"
+                slow_carb = "✅" if food.slow_carb_friendly else "❌"
+                response = f"🍽️ **{food.name}**\n"
+                response += f"Serving: {food.serving_size}\n\n"
+                response += f"📊 Nutrition:\n"
+                response += f"   Calories: {food.calories}\n"
+                response += f"   Protein: {food.protein}g\n"
+                response += f"   Carbs: {food.carbs}g\n"
+                response += f"   Fat: {food.fat}g\n\n"
+                response += f"Keto: {keto} | Slow Carb: {slow_carb}"
+            else:
+                response = f"Food '{arguments['food']}' not found in database."
+            return [TextContent(type="text", text=response)]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        import traceback
+        return [TextContent(type="text", text=f"Error: {str(e)}\n{traceback.format_exc()}")]
 
 
 @server.list_prompts()
@@ -630,20 +585,18 @@ async def list_prompts() -> List[Prompt]:
     return [
         Prompt(
             name="daily-checkin",
-            description="Guided daily check-in for logging meals, mood, and activities",
+            description="Start a guided daily check-in for logging meals, workouts, and wellness",
             arguments=[],
         ),
         Prompt(
             name="weekly-review",
-            description="Review your week's progress and get insights",
+            description="Review the week's progress and get insights",
             arguments=[],
         ),
         Prompt(
-            name="log-meal-helper",
-            description="Help log a meal with nutritional estimates",
-            arguments=[
-                {"name": "meal_description", "description": "Describe what you ate"}
-            ],
+            name="meal-planning",
+            description="Get help planning meals for the day based on your goals",
+            arguments=[],
         ),
     ]
 
@@ -658,17 +611,13 @@ async def get_prompt(name: str, arguments: Optional[dict] = None) -> GetPromptRe
                     role="user",
                     content=TextContent(
                         type="text",
-                        text="""Let's do a daily check-in! Please help me log:
+                        text="""Start my daily check-in! First get my daily briefing to see where I stand, then help me:
 
-1. **Meals**: What have you eaten today? I'll help estimate calories and protein.
+1. Log any meals I haven't recorded yet
+2. Log any workouts
+3. Check my progress toward goals
 
-2. **Activity**: Did you work out or do any physical activity?
-
-3. **Wellness**: How are you feeling? (mood and energy level)
-
-4. **Weight**: Did you weigh yourself today?
-
-Let's start with meals - what did you have for breakfast?"""
+Ask me what I've eaten today and help estimate the nutrition. Follow up with clarifying questions to make the log accurate."""
                     )
                 )
             ]
@@ -681,37 +630,31 @@ Let's start with meals - what did you have for breakfast?"""
                     role="user",
                     content=TextContent(
                         type="text",
-                        text="""Please give me a comprehensive weekly review:
+                        text="""Give me a comprehensive weekly review:
 
-1. First, get my weekly summary
-2. Then show me calorie trends
-3. Show workout trends
-4. Show any weight changes
-5. Give me personalized insights
-
-I want to understand how I did this week and what I can improve."""
+1. Get my goal status
+2. Show calorie, workout, and weight trends
+3. Ask the database about my progress
+4. Provide insights and recommendations for next week"""
                     )
                 )
             ]
         )
 
-    elif name == "log-meal-helper":
-        meal_desc = arguments.get("meal_description", "my meal") if arguments else "my meal"
+    elif name == "meal-planning":
         return GetPromptResult(
             messages=[
                 PromptMessage(
                     role="user",
                     content=TextContent(
                         type="text",
-                        text=f"""I want to log this meal: {meal_desc}
+                        text="""Help me plan my meals for today. First get my daily briefing to see what I've eaten and how much I have left, then:
 
-Please help me:
-1. Estimate the calories
-2. Estimate the protein content
-3. Suggest appropriate tags (healthy, high protein, etc.)
-4. Log it using the log_meal tool
+1. Suggest meals that fit my remaining calories and protein
+2. Follow keto and slow-carb principles
+3. Give me specific meal ideas with portions
 
-Be reasonable with estimates based on typical portions."""
+Remember my goals: lose 50 lbs, increase strength, stamina, and flexibility."""
                     )
                 )
             ]
