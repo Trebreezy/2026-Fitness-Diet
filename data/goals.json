@@ -1,0 +1,83 @@
+{
+  "daily_targets": {
+    "calories": 2000,
+    "protein": 200,
+    "carbs": 50,
+    "fat": 100,
+    "sodium": 1500,
+    "fiber": 30,
+    "water": 100,
+    "workouts_per_week": 5,
+    "steps": 10000
+  },
+  "fitness_goals": [
+    {
+      "goal_type": "strength",
+      "metric": "pushups",
+      "starting_value": 10,
+      "target_value": 50,
+      "unit": "reps",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    },
+    {
+      "goal_type": "strength",
+      "metric": "squats",
+      "starting_value": 15,
+      "target_value": 100,
+      "unit": "reps",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    },
+    {
+      "goal_type": "strength",
+      "metric": "plank",
+      "starting_value": 30,
+      "target_value": 180,
+      "unit": "seconds",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    },
+    {
+      "goal_type": "stamina",
+      "metric": "run_distance",
+      "starting_value": 1,
+      "target_value": 10,
+      "unit": "km",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    },
+    {
+      "goal_type": "stamina",
+      "metric": "workout_duration",
+      "starting_value": 20,
+      "target_value": 60,
+      "unit": "minutes",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    },
+    {
+      "goal_type": "flexibility",
+      "metric": "touch_toes",
+      "starting_value": 0,
+      "target_value": 1,
+      "unit": "yes/no (1=yes)",
+      "current_value": null,
+      "start_date": "2026-01-02",
+      "target_date": "2026-12-31"
+    }
+  ],
+  "weight_goal": {
+    "starting_weight": 250,
+    "target_weight": 200,
+    "start_date": "2026-01-01",
+    "target_date": "2026-12-31",
+    "current_weight": null,
+    "last_weigh_in": null
+  }
+}

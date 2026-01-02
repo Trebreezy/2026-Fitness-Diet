@@ -3,6 +3,7 @@ Webhook server for Fitness & Diet logging from anywhere.
 Accepts POST requests to log meals, workouts, weight, and notes to Notion.
 """
 import os
+import re
 import sys
 from datetime import datetime, date
 from typing import Optional
@@ -118,14 +119,14 @@ async def log_meal(meal: MealLog, x_api_key: str = Header(None)):
     if parsed.get("health_notes"):
         notes_parts.append(parsed["health_notes"])
 
-    # Log to Notion
-    entry = notion.create_entry(
-        entry_type="Meal",
-        title=f"{meal_type}: {meal.description[:50]}",
-        notes="\n".join(notes_parts) if notes_parts else None,
+    # Log to Notion using create_log_entry
+    entry = notion.create_log_entry(
+        name=f"{meal_type}: {meal.description[:50]}",
+        log_type="Meal",
+        description="\n".join(notes_parts) if notes_parts else None,
         calories=parsed.get("estimated_calories"),
         protein=parsed.get("estimated_protein"),
-        mood=None,
+        categories=[meal_type],
     )
 
     return {
@@ -150,21 +151,22 @@ async def log_workout(workout: WorkoutLog, x_api_key: str = Header(None)):
     parsed = assistant.parse_workout_entry(workout.description)
 
     duration = workout.duration_minutes or parsed.get("estimated_duration", 30)
+    category = parsed.get("category", "General")
 
     # Log to Notion
-    entry = notion.create_entry(
-        entry_type="Workout",
-        title=f"Workout: {workout.description[:50]}",
-        notes=workout.notes,
+    entry = notion.create_log_entry(
+        name=f"Workout: {workout.description[:50]}",
+        log_type="Workout",
+        description=workout.notes,
         duration=duration,
-        workout_type=parsed.get("category", "General"),
+        categories=[category] if category else None,
     )
 
     return {
         "success": True,
         "entry_id": entry.get("id"),
         "parsed": {
-            "category": parsed.get("category"),
+            "category": category,
             "duration": duration,
             "calories_burned": parsed.get("estimated_calories_burned"),
         }
@@ -181,10 +183,11 @@ async def log_weight(weight_log: WeightLog, x_api_key: str = Header(None)):
     status = goals.get_weight_status()
 
     # Log to Notion
-    entry = notion.create_entry(
-        entry_type="Weight",
-        title=f"Weight: {weight_log.weight} lbs",
-        notes=weight_log.notes,
+    entry = notion.create_log_entry(
+        name=f"Weight: {weight_log.weight} lbs",
+        log_type="Weight",
+        description=weight_log.notes,
+        weight=weight_log.weight,
     )
 
     return {
@@ -205,11 +208,11 @@ async def log_mood(mood_log: MoodLog, x_api_key: str = Header(None)):
     """Log mood to Notion."""
     verify_api_key(x_api_key)
 
-    entry = notion.create_entry(
-        entry_type="Mood",
-        title=f"Mood: {mood_log.mood}",
-        notes=mood_log.notes,
-        mood=mood_log.mood,
+    entry = notion.create_log_entry(
+        name=f"Mood: {mood_log.mood}",
+        log_type="Mood",
+        description=mood_log.notes,
+        mood_score=mood_log.mood,
     )
 
     return {
@@ -234,7 +237,6 @@ async def quick_log(log: QuickLog, x_api_key: str = Header(None)):
     text = log.text.lower()
 
     # Detect weight
-    import re
     weight_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:lbs?|pounds?)', text)
     if weight_match:
         weight = float(weight_match.group(1))
@@ -271,15 +273,18 @@ async def get_status(x_api_key: str = Header(None)):
     verify_api_key(x_api_key)
 
     # Get today's logs
-    today = date.today().isoformat()
-    logs = notion.query_logs(start_date=today, end_date=today)
+    today_date = date.today()
+    logs = notion.query_logs(start_date=today_date, end_date=today_date)
+
+    # Extract log data
+    extracted_logs = [notion.extract_log_data(log) for log in logs]
 
     # Calculate daily progress
-    daily_progress = goals.check_daily_progress(logs)
+    daily_progress = goals.check_daily_progress(extracted_logs)
     weight_status = goals.get_weight_status()
 
     return {
-        "date": today,
+        "date": today_date.isoformat(),
         "calories": daily_progress["calories"],
         "protein": daily_progress["protein"],
         "workouts": daily_progress["workouts"],
